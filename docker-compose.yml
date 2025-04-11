@@ -1,0 +1,15 @@
+services:
+  blogapi:
+    container_name: blogapi
+    image: image_blogapi
+    build: .
+    ports:
+      - "127.0.0.1:8002:80"
+    env_file:
+      - .env
+    networks:
+      - my_network
+
+networks:
+  my_network:
+    external: true

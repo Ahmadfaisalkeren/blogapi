@@ -1,0 +1,158 @@
+name: Deploy Laravel to Docker Server
+on:
+  push:
+    branches:
+      - main
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connect to VPS
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            PROJECT_PATH="/var/www/docker/blogapi"
+
+            if [ -d "$PROJECT_PATH/.git" ]; then
+              cd $PROJECT_PATH
+              echo "Project exists, performing update..."
+            else
+              rm -rf $PROJECT_PATH
+              git clone -b main https://github.com/Ahmadfaisalkeren/blogapi.git $PROJECT_PATH
+              cd $PROJECT_PATH
+            fi
+
+      - name: Pull Latest Changes
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/docker/blogapi
+            git pull origin main
+
+      - name: Setup Environment File
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/docker/blogapi
+            if [ ! -f .env ]; then
+              cp .env.example .env
+              sed -i "s|APP_KEY=.*|APP_KEY=${{ secrets.APP_KEY }}|" .env
+              sed -i "s|DB_HOST=.*|DB_HOST=mysql_server|" .env
+              sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${{ secrets.DB_PASSWORD }}|" .env
+              sed -i '/^DB_PASSWORD=/p; s/^DB_PASSWORD=/DB_ROOT_PASSWORD=/' .env
+            fi
+
+      - name: Deploy Nginx Configuration
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            echo "Deploying Nginx Configuration..."
+            cp /var/www/docker/blogapi/.nginx/blogapi.conf /etc/nginx/conf.d/blogapi.conf
+            docker exec nginx-container nginx -s reload
+            echo "Nginx configuration updated & reloaded."
+
+      - name: Build Docker Services
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/docker/blogapi
+            docker compose up -d --build
+
+            - name: Verify Services
+            uses: appleboy/ssh-action@v0.1.10
+            with:
+              host: ${{ secrets.VPS_HOST }}
+              username: ${{ secrets.VPS_USERNAME }}
+              key: ${{ secrets.VPS_SSH_KEY }}
+              script: |
+                cd /var/www/docker/blogapi
+                echo "Checking container statuses..."
+                docker ps | grep mysql_server
+                docker ps | grep blogapi
+
+                echo "Verifying network connectivity..."
+                docker exec blogapi ping -c 2 mysql_server
+
+                echo "Testing MySQL connection..."
+                docker exec mysql_server mysqladmin ping -h localhost -u root -p${{ secrets.DB_PASSWORD }}
+
+      - name: Create Database if Not Exists
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            docker exec -i mysql_server mysql -u root -p${{ secrets.DB_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS blogapi;"
+
+      - name: Wait for Database
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/docker/blogapi
+            counter=0
+            max_retries=15
+            until docker exec mysql_server mysql -u root -p${{ secrets.DB_PASSWORD }} -e "SELECT 1;" 2>/dev/null; do
+              counter=$((counter + 1))
+              [ $counter -eq $max_retries ] && exit 1
+              echo "Waiting for database... Attempt $counter/$max_retries"
+              sleep 5
+            done
+
+      - name: Generate Application Key
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/docker/blogapi
+            docker compose exec -T blogapi php artisan key:generate
+
+      - name: Run Database Migrations
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/docker/blogapi
+            docker compose exec -T blogapi php artisan migrate --force
+
+      - name: Create Storage Link
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/docker/blogapi
+            docker compose exec -T blogapi php artisan storage:link
+
+      - name: Clear Application Cache
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/docker/blogapi
+            docker compose exec -T blogapi php artisan optimize:clear
